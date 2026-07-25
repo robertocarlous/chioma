@@ -1,15 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 import { useAuth } from '@/store/authStore';
 import toast from 'react-hot-toast';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 import OAuthButtons from '@/components/auth/OAuthButtons';
 
 const inputClasses =
   'w-full px-4 py-3 bg-ink-800 border border-cream/10 rounded-xl text-cream placeholder:text-cream-dim/40 focus:outline-none focus:border-brass-500/60 transition-colors text-sm';
+
+const inputErrorClasses = 'border-red-400/60 focus:border-red-400/60';
 
 const labelClasses =
   'block text-xs font-semibold text-cream-dim uppercase tracking-widest mb-2';
@@ -27,20 +32,85 @@ const roles = [
   },
 ];
 
+const signupSchema = z
+  .object({
+    firstName: z.string().min(1, 'First name is required'),
+    lastName: z.string().min(1, 'Last name is required'),
+    email: z.email('Enter a valid email address'),
+    password: z.string().min(8, 'Password must be at least 8 characters'),
+    confirmPassword: z.string().min(1, 'Please confirm your password'),
+    role: z.enum(['user', 'agent']),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  });
+
+type SignupFormData = z.infer<typeof signupSchema>;
+
+function Field({
+  id,
+  label,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label htmlFor={id} className={labelClasses}>
+        {label}
+        <span className="text-brass-400 ml-0.5" aria-hidden="true">
+          *
+        </span>
+      </label>
+      {children}
+      {error && (
+        <p
+          id={`${id}-error`}
+          role="alert"
+          className="mt-1.5 text-xs text-red-400"
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function SignupPage() {
   const router = useRouter();
-  const { register, isAuthenticated, user, loading } = useAuth();
+  const { register: registerUser, isAuthenticated, user, loading } = useAuth();
 
-  const [form, setForm] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-    role: 'user' as 'user' | 'agent',
-  });
   const [showPassword, setShowPassword] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const {
+    register,
+    handleSubmit,
+    trigger,
+    watch,
+    formState: { errors, touchedFields, isValid, isSubmitting },
+  } = useForm<SignupFormData>({
+    resolver: zodResolver(signupSchema),
+    mode: 'onTouched',
+    defaultValues: {
+      firstName: '',
+      lastName: '',
+      email: '',
+      password: '',
+      confirmPassword: '',
+      role: 'user',
+    },
+  });
+
+  // Compute initial validity (for the disabled submit button) without
+  // surfacing error messages before the user has touched a field.
+  useEffect(() => {
+    void trigger();
+  }, [trigger]);
 
   useEffect(() => {
     if (!loading && isAuthenticated && user) {
@@ -48,29 +118,16 @@ export default function SignupPage() {
     }
   }, [isAuthenticated, user, loading, router]);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
-  };
+  const selectedRole = watch('role');
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (form.password !== form.confirmPassword) {
-      toast.error('Passwords do not match.');
-      return;
-    }
-    if (form.password.length < 8) {
-      toast.error('Password must be at least 8 characters.');
-      return;
-    }
-    setIsSubmitting(true);
-    const result = await register({
-      firstName: form.firstName,
-      lastName: form.lastName,
-      email: form.email,
-      password: form.password,
-      role: form.role,
+  const onSubmit = async (data: SignupFormData) => {
+    const result = await registerUser({
+      firstName: data.firstName,
+      lastName: data.lastName,
+      email: data.email,
+      password: data.password,
+      role: data.role,
     });
-    setIsSubmitting(false);
     if (result.success) {
       toast.success('Account created! Welcome to Chioma.');
       router.push('/user');
@@ -78,6 +135,15 @@ export default function SignupPage() {
       toast.error(result.error ?? 'Registration failed. Please try again.');
     }
   };
+
+  const fieldError = (name: keyof SignupFormData) =>
+    touchedFields[name] ? errors[name]?.message : undefined;
+
+  const firstNameError = fieldError('firstName');
+  const lastNameError = fieldError('lastName');
+  const emailError = fieldError('email');
+  const passwordError = fieldError('password');
+  const confirmPasswordError = fieldError('confirmPassword');
 
   return (
     <div>
@@ -103,7 +169,11 @@ export default function SignupPage() {
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form
+        onSubmit={handleSubmit(onSubmit)}
+        className="space-y-5"
+        noValidate
+      >
         {/* Role selection */}
         <fieldset>
           <legend className={labelClasses}>I want to…</legend>
@@ -112,18 +182,16 @@ export default function SignupPage() {
               <label
                 key={role.value}
                 className={`cursor-pointer rounded-xl border px-4 py-3 transition-colors ${
-                  form.role === role.value
+                  selectedRole === role.value
                     ? 'border-brass-500/70 bg-brass-500/10'
                     : 'border-cream/10 bg-ink-800 hover:border-cream/25'
                 }`}
               >
                 <input
                   type="radio"
-                  name="role"
                   value={role.value}
-                  checked={form.role === role.value}
-                  onChange={handleChange}
                   className="sr-only"
+                  {...register('role')}
                 />
                 <span className="block text-sm font-semibold text-cream">
                   {role.title}
@@ -137,72 +205,58 @@ export default function SignupPage() {
         </fieldset>
 
         <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="firstName" className={labelClasses}>
-              First name
-            </label>
+          <Field id="firstName" label="First name" error={firstNameError}>
             <input
               id="firstName"
-              name="firstName"
               type="text"
               autoComplete="given-name"
-              value={form.firstName}
-              onChange={handleChange}
-              required
               placeholder="Ada"
-              className={inputClasses}
+              aria-invalid={!!firstNameError}
+              aria-describedby={
+                firstNameError ? 'firstName-error' : undefined
+              }
+              className={`${inputClasses} ${firstNameError ? inputErrorClasses : ''}`}
+              {...register('firstName')}
             />
-          </div>
-          <div>
-            <label htmlFor="lastName" className={labelClasses}>
-              Last name
-            </label>
+          </Field>
+          <Field id="lastName" label="Last name" error={lastNameError}>
             <input
               id="lastName"
-              name="lastName"
               type="text"
               autoComplete="family-name"
-              value={form.lastName}
-              onChange={handleChange}
-              required
               placeholder="Okafor"
-              className={inputClasses}
+              aria-invalid={!!lastNameError}
+              aria-describedby={lastNameError ? 'lastName-error' : undefined}
+              className={`${inputClasses} ${lastNameError ? inputErrorClasses : ''}`}
+              {...register('lastName')}
             />
-          </div>
+          </Field>
         </div>
 
-        <div>
-          <label htmlFor="email" className={labelClasses}>
-            Email address
-          </label>
+        <Field id="email" label="Email address" error={emailError}>
           <input
             id="email"
-            name="email"
             type="email"
             autoComplete="email"
-            value={form.email}
-            onChange={handleChange}
-            required
             placeholder="you@example.com"
-            className={inputClasses}
+            aria-invalid={!!emailError}
+            aria-describedby={emailError ? 'email-error' : undefined}
+            className={`${inputClasses} ${emailError ? inputErrorClasses : ''}`}
+            {...register('email')}
           />
-        </div>
+        </Field>
 
-        <div>
-          <label htmlFor="password" className={labelClasses}>
-            Password
-          </label>
+        <Field id="password" label="Password" error={passwordError}>
           <div className="relative">
             <input
               id="password"
-              name="password"
               type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
-              value={form.password}
-              onChange={handleChange}
-              required
               placeholder="Min. 8 characters"
-              className={`${inputClasses} pr-12`}
+              aria-invalid={!!passwordError}
+              aria-describedby={passwordError ? 'password-error' : undefined}
+              className={`${inputClasses} ${passwordError ? inputErrorClasses : ''} pr-12`}
+              {...register('password')}
             />
             <button
               type="button"
@@ -213,28 +267,30 @@ export default function SignupPage() {
               {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
             </button>
           </div>
-        </div>
+        </Field>
 
-        <div>
-          <label htmlFor="confirmPassword" className={labelClasses}>
-            Confirm password
-          </label>
+        <Field
+          id="confirmPassword"
+          label="Confirm password"
+          error={confirmPasswordError}
+        >
           <input
             id="confirmPassword"
-            name="confirmPassword"
             type={showPassword ? 'text' : 'password'}
             autoComplete="new-password"
-            value={form.confirmPassword}
-            onChange={handleChange}
-            required
             placeholder="Re-enter password"
-            className={inputClasses}
+            aria-invalid={!!confirmPasswordError}
+            aria-describedby={
+              confirmPasswordError ? 'confirmPassword-error' : undefined
+            }
+            className={`${inputClasses} ${confirmPasswordError ? inputErrorClasses : ''}`}
+            {...register('confirmPassword')}
           />
-        </div>
+        </Field>
 
         <button
           type="submit"
-          disabled={isSubmitting}
+          disabled={isSubmitting || !isValid}
           className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-brass-500 hover:bg-brass-400 disabled:opacity-60 disabled:cursor-not-allowed text-ink-950 font-semibold rounded-xl transition-colors text-sm mt-2"
         >
           {isSubmitting && <Loader2 size={16} className="animate-spin" />}
