@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 import { PaymentInterval } from './entities/payment-schedule.entity';
 import { PaymentStatus } from './entities/payment.entity';
 import {
@@ -18,6 +19,22 @@ export function getIdempotencyKey(dto: {
   idempotencyKey?: unknown;
 }): string | null {
   return typeof dto.idempotencyKey === 'string' ? dto.idempotencyKey : null;
+}
+
+/**
+ * True when `error` is a Postgres unique-violation (23505) raised by
+ * TypeORM. Used to detect the case where two concurrent requests both pass
+ * the idempotency check-then-act window and race to insert the same
+ * (userId, idempotencyKey) pair — the database's unique index is the
+ * ultimate arbiter, so the loser of that race should fetch and return the
+ * winner's row instead of surfacing a raw 500.
+ */
+export function isUniqueConstraintViolation(error: unknown): boolean {
+  return (
+    (error instanceof QueryFailedError ||
+      (error as { name?: string } | null)?.name === 'QueryFailedError') &&
+    (error as { code?: string } | null)?.code === '23505'
+  );
 }
 
 export function addDays(date: Date, days: number): Date {

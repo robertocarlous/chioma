@@ -280,6 +280,76 @@ describe('PaymentService', () => {
       expect(findOneSpy).not.toHaveBeenCalled();
     });
 
+    it('returns the winning row when a concurrent request loses the idempotency race at insert time', async () => {
+      // Simulates two requests racing past the initial check (both see no
+      // existing row) — the loser's INSERT hits the DB unique index and
+      // must gracefully return the winner's row instead of throwing 500.
+      const winningPayment = {
+        id: 'pay_winner',
+        status: PaymentStatus.COMPLETED,
+      } as Payment;
+      (paymentRepository.findOne as jest.Mock)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(winningPayment);
+      (paymentMethodRepository.findOne as jest.Mock).mockResolvedValue({
+        id: 1,
+        userId: 'user_1',
+        encryptedMetadata: null,
+      });
+      mockPaymentGateway.chargePayment.mockResolvedValue({
+        success: true,
+        chargeId: 'charge_race',
+      });
+      (paymentRepository.create as jest.Mock).mockImplementation(
+        (data: Partial<Payment>) => data as Payment,
+      );
+      (paymentRepository.save as jest.Mock).mockRejectedValue({
+        name: 'QueryFailedError',
+        code: '23505',
+      });
+
+      const dto = {
+        agreementId: 'agreement_1',
+        amount: 100,
+        paymentMethodId: '1',
+        idempotencyKey: 'idem_race',
+      } as CreatePaymentRecordDto & { idempotencyKey: string };
+
+      const result = await service.recordPayment(dto, 'user_1');
+
+      expect(result).toBe(winningPayment);
+      expect(paymentRepository.findOne).toHaveBeenCalledTimes(2);
+    });
+
+    it('rethrows non-conflict database errors instead of swallowing them', async () => {
+      (paymentRepository.findOne as jest.Mock).mockResolvedValue(null);
+      (paymentMethodRepository.findOne as jest.Mock).mockResolvedValue({
+        id: 1,
+        userId: 'user_1',
+        encryptedMetadata: null,
+      });
+      mockPaymentGateway.chargePayment.mockResolvedValue({
+        success: true,
+        chargeId: 'charge_err',
+      });
+      (paymentRepository.create as jest.Mock).mockImplementation(
+        (data: Partial<Payment>) => data as Payment,
+      );
+      const dbError = new Error('connection terminated unexpectedly');
+      (paymentRepository.save as jest.Mock).mockRejectedValue(dbError);
+
+      const dto = {
+        agreementId: 'agreement_1',
+        amount: 100,
+        paymentMethodId: '1',
+        idempotencyKey: 'idem_other_error',
+      } as CreatePaymentRecordDto & { idempotencyKey: string };
+
+      await expect(service.recordPayment(dto, 'user_1')).rejects.toBe(
+        dbError,
+      );
+    });
+
     it('records payment successfully', async () => {
       (paymentRepository.findOne as jest.Mock).mockResolvedValue(null);
       (paymentMethodRepository.findOne as jest.Mock).mockResolvedValue({

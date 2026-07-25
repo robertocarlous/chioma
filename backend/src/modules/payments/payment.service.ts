@@ -24,6 +24,7 @@ import {
   encryptMetadata,
   ensureUserId,
   getIdempotencyKey,
+  isUniqueConstraintViolation,
   PAYMENT_STATUS_MAP,
 } from './payment.helpers';
 import { runBatch, BatchResult } from '../../common/utils/batch.utils';
@@ -154,7 +155,15 @@ export class PaymentService {
         notes: dto.notes,
         idempotencyKey,
       });
-      await this.paymentRepository.save(failedPayment);
+      try {
+        await this.paymentRepository.save(failedPayment);
+      } catch (error) {
+        return this.resolveIdempotencyRaceOrThrow(
+          userId,
+          idempotencyKey,
+          error,
+        );
+      }
       await this.notificationsService.notify(
         userId,
         'Payment failed',
@@ -182,7 +191,12 @@ export class PaymentService {
       idempotencyKey,
     });
 
-    const savedPayment = await this.paymentRepository.save(payment);
+    let savedPayment: Payment;
+    try {
+      savedPayment = await this.paymentRepository.save(payment);
+    } catch (error) {
+      return this.resolveIdempotencyRaceOrThrow(userId, idempotencyKey, error);
+    }
     this.logger.log(`Payment recorded: ${savedPayment.id}`);
 
     void this.fraudHooksService.onPaymentRecorded({
@@ -200,6 +214,35 @@ export class PaymentService {
     );
 
     return savedPayment;
+  }
+
+  /**
+   * Handles the residual race where two concurrent requests both pass the
+   * idempotency check-then-act window and both attempt to insert a payment
+   * for the same (userId, idempotencyKey) pair. The database's unique index
+   * (`uq_payments_user_id_idempotency_key`) is the authoritative lock: only
+   * one insert can win, and the loser lands here with a Postgres
+   * unique-violation (23505) instead of a persisted duplicate. Rather than
+   * surfacing that as an unhandled 500, fetch and return the winner's row so
+   * duplicate requests are idempotent regardless of timing.
+   */
+  private async resolveIdempotencyRaceOrThrow(
+    userId: string,
+    idempotencyKey: string | null,
+    error: unknown,
+  ): Promise<Payment> {
+    if (idempotencyKey && isUniqueConstraintViolation(error)) {
+      const existingPayment = await this.paymentRepository.findOne({
+        where: { userId, idempotencyKey },
+      });
+      if (existingPayment) {
+        this.logger.warn(
+          `Idempotency race detected for key "${idempotencyKey}"; returning existing payment ${existingPayment.id} instead of duplicating it.`,
+        );
+        return existingPayment;
+      }
+    }
+    throw error;
   }
 
   async generateReceipt(paymentId: string, userId: string): Promise<any> {
