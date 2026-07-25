@@ -378,15 +378,17 @@ describe('PropertiesService – Pagination', () => {
       );
     });
 
-    it('should apply full-text search on title and description', async () => {
+    it('should apply indexed full-text search on title, description and address', async () => {
       mockQb = makeQueryBuilder([], 0);
       mockPropertyRepository.createQueryBuilder.mockReturnValue(mockQb);
 
       await service.findAll({ search: 'modern apartment' });
 
       expect(mockQb.andWhere).toHaveBeenCalledWith(
-        expect.stringContaining('LOWER(property.title) LIKE LOWER(:search)'),
-        { search: '%modern apartment%' },
+        expect.stringContaining(
+          "property.search_vector @@ plainto_tsquery('english', :search)",
+        ),
+        { search: 'modern apartment', searchLike: '%modern apartment%' },
       );
     });
 

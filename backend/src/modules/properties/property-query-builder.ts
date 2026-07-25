@@ -137,14 +137,22 @@ export class PropertyQueryBuilder {
   }
 
   /**
-   * Apply full-text search on title and description
+   * Full-text search across title, description, address, city and state.
+   *
+   * Backed by the `search_vector` GIN index (see migration
+   * 1783000000000-AddPropertySearchIndexes) for stemmed whole-word matches,
+   * OR'd with an ILIKE fallback on title/address for substring and prefix
+   * matches — those are backed by pg_trgm GIN indexes (see migration
+   * 1900600000000-AddPropertyTrigramSearchIndexes) so they don't degrade to
+   * a sequential scan the way an unindexed `LIKE '%...%'` would.
    */
   applySearchFilter(search?: string): this {
     if (search) {
       this.queryBuilder.andWhere(
-        '(LOWER(property.title) LIKE LOWER(:search) OR ' +
-          'LOWER(property.description) LIKE LOWER(:search))',
-        { search: `%${search}%` },
+        "(property.search_vector @@ plainto_tsquery('english', :search) OR " +
+          'property.title ILIKE :searchLike OR ' +
+          'property.address ILIKE :searchLike)',
+        { search, searchLike: `%${search}%` },
       );
     }
     return this;

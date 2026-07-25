@@ -58,6 +58,75 @@ SELECT * FROM properties WHERE city = 'Lagos' AND status = 'published';
 SELECT * FROM properties WHERE price BETWEEN 100000 AND 500000;
 ```
 
+### Properties Full-Text & Substring Search
+
+Property title/description/address/city/state search used plain
+`LOWER(column) LIKE LOWER('%term%')` predicates, which cannot use a
+standard B-tree index (a leading wildcard forces a sequential scan) and
+degraded as the `properties` table grew — issue #1425.
+
+| Index Name                        | Columns       | Type          | Purpose                                              |
+| ---------------------------------- | ------------- | ------------- | ----------------------------------------------------- |
+| `IDX_properties_search_vector`     | `search_vector` (generated tsvector of title + description + address + city + state + country) | GIN | Stemmed, whole-word full-text search |
+| `IDX_properties_title_trgm`        | `title`       | GIN (pg_trgm) | Substring/prefix `LIKE`/`ILIKE` on title              |
+| `IDX_properties_address_trgm`      | `address`     | GIN (pg_trgm) | Substring/prefix `LIKE`/`ILIKE` on address             |
+| `IDX_properties_city_trgm`         | `city`        | GIN (pg_trgm) | Substring/prefix `LIKE`/`ILIKE` on city                |
+| `IDX_properties_state_trgm`        | `state`       | GIN (pg_trgm) | Substring/prefix `LIKE`/`ILIKE` on state               |
+
+`search_vector` is a trigger-maintained column (`properties_search_vector_trigger`,
+migration `1783000000000-AddPropertySearchIndexes`) — it is deliberately
+**not** mapped on the TypeORM `Property` entity so `synchronize`/entity-diff
+tooling never attempts to drop it (see `1900100000000-AlignSchemaWithEntities.ts`).
+The trigram indexes were added in `1900600000000-AddPropertyTrigramSearchIndexes`
+and require the `pg_trgm` extension (created by that same migration).
+
+Two different indexing techniques are used because they solve different
+problems:
+
+- **GIN + tsvector** matches whole words after stemming/stop-word removal
+  (`"apartments"` matches a search for `"apartment"`). It cannot accelerate
+  arbitrary substring matches.
+- **GIN + pg_trgm** indexes 3-character substrings ("trigrams"), so it
+  accelerates `LIKE '%mid%'`/`ILIKE` queries regardless of where the match
+  falls in the string — the case `LIKE`/tsvector can't cover.
+
+`PropertyQueryBuilder.applySearchFilter()` (`src/modules/properties/property-query-builder.ts`)
+and `SearchService.buildPropertyQuery()`/`executeSuggest()`
+(`src/modules/search/search.service.ts`) both query `search_vector` and/or
+plain (unwrapped) `ILIKE` on `title`/`address`/`city`/`state` so the planner
+can choose either index. Avoid wrapping these columns in `LOWER(...)` in new
+query code — a functional `LOWER()` call prevents Postgres from using the
+trigram index unless a matching functional index exists too.
+
+**Query Patterns Optimized:**
+
+```sql
+-- Property listing search (title/description, stemmed)
+SELECT * FROM properties WHERE search_vector @@ plainto_tsquery('english', 'modern apartment');
+
+-- Substring search across title/address
+SELECT * FROM properties WHERE title ILIKE '%mid%' OR address ILIKE '%mid%';
+
+-- Search-as-you-type suggestions
+SELECT * FROM properties WHERE title ILIKE 'lek%' OR city ILIKE 'lek%';
+```
+
+**Benchmarking:**
+
+```bash
+pnpm run db:benchmark-search -- "modern apartment"
+```
+
+Runs `EXPLAIN (ANALYZE, BUFFERS)` for the old unindexed `LIKE` pattern
+alongside the new indexed pattern against the current database, printing
+the planner's chosen scan type (sequential vs. index) and actual execution
+time for each so the improvement can be measured directly against real
+data rather than assumed. On a small/empty table Postgres may still prefer
+a sequential scan for either query (it's cheaper for a handful of pages) —
+the difference becomes visible as the table grows; see
+`src/database/seed-runner.ts` (`pnpm run seed:data`) for seeding a larger
+dataset before benchmarking.
+
 ### Rent Agreements Table
 
 | Index Name                            | Columns                  | Type                     | Purpose                      |
